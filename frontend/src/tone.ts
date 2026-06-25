@@ -1,5 +1,5 @@
 import * as Tone from 'tone';
-import { Midi } from '@tonejs/midi';
+import { loadMidiIntoTone } from './utils/loadMidiIntoTone';
 
 const SOUNDFONT_URL =
   'https://gleitz.github.io/midi-js-soundfonts/MusyngKite/acoustic_guitar_nylon-mp3.js';
@@ -47,19 +47,8 @@ export function loadSampler(): Promise<Tone.Sampler> {
 }
 
 export async function scheduleNotes(midiBytes: ArrayBuffer): Promise<void> {
-  const sampler = await loadSampler();
-  const midi = new Midi(midiBytes);
-  const track = midi.tracks[0];
-  if (!track) return;
-
-  Tone.getTransport().cancel();
-
-  for (const note of track.notes) {
-    const noteName = Tone.Frequency(note.midi, 'midi').toNote();
-    Tone.getTransport().schedule((audioTime) => {
-      sampler.triggerAttackRelease(noteName, note.duration, audioTime, note.velocity);
-    }, note.time);
-  }
+  const blob = new Blob([midiBytes], { type: 'audio/midi' });
+  await loadMidiIntoTone(blob, 0, false);
 }
 
 export function transportStart(): void {

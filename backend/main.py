@@ -1,12 +1,20 @@
 import os
 import tempfile
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
-from midi_gen import generate_midi_bytes
-from parser import parse_gp
+import guitarpro
+
+from analysis.techniques import extract_techniques
+from db.client import get_client
+from midi_gen import generate_midi_bytes, generate_midi_from_song_data
+from parser import parse_gp_song
 
 _ALLOWED_EXTENSIONS = {".gp", ".gp3", ".gp4", ".gp5", ".gpx"}
 
@@ -31,6 +39,48 @@ async def _save_upload(file: UploadFile, suffix: str) -> str:
         tmp.close()
 
 
+def _compute_duration(song_data: dict) -> float:
+    end = 0.0
+    for track in song_data.get("tracks", []):
+        for measure in track.get("measures", []):
+            for beat in measure.get("beats", []):
+                t = beat.get("time", 0) + beat.get("duration", 0)
+                if t > end:
+                    end = t
+    return round(end, 3)
+
+
+def _persist_song(song_data: dict, techniques: dict) -> None:
+    db = get_client()
+    duration = _compute_duration(song_data)
+
+    song_resp = (
+        db.table("songs")
+        .insert({
+            "title": song_data["title"],
+            "artist": song_data.get("artist"),
+            "tempo": song_data["tempo"],
+            "duration": duration,
+            "track_count": len(song_data["tracks"]),
+            **techniques,
+        })
+        .execute()
+    )
+    song_id = song_resp.data[0]["id"]
+
+    track_rows = [
+        {
+            "song_id": song_id,
+            "track_index": i,
+            "name": t["name"],
+            "tuning": t["tuning"],
+            "note_data": t["measures"],
+        }
+        for i, t in enumerate(song_data["tracks"])
+    ]
+    db.table("tracks").insert(track_rows).execute()
+
+
 @app.post("/parse")
 async def parse_endpoint(file: UploadFile):
     if not file.filename:
@@ -48,7 +98,12 @@ async def parse_endpoint(file: UploadFile):
 
     tmp_path = await _save_upload(file, ext)
     try:
-        return parse_gp(tmp_path)
+        try:
+            gp_song = guitarpro.parse(tmp_path)
+        except Exception as exc:
+            raise ValueError(f"Failed to parse Guitar Pro file: {exc}") from exc
+        song_data = parse_gp_song(gp_song)
+        techniques = extract_techniques(gp_song)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     except Exception as exc:
@@ -56,9 +111,17 @@ async def parse_endpoint(file: UploadFile):
     finally:
         os.unlink(tmp_path)
 
+    try:
+        _persist_song(song_data, techniques)
+    except Exception as exc:
+        # Non-fatal: return parse result even if DB write fails
+        print(f"Warning: DB write failed: {exc}")
+
+    return song_data
+
 
 @app.post("/midi")
-async def midi_endpoint(file: UploadFile):
+async def midi_endpoint(file: UploadFile, track_index: int = 0):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
 
@@ -74,7 +137,7 @@ async def midi_endpoint(file: UploadFile):
 
     tmp_path = await _save_upload(file, ext)
     try:
-        midi_bytes = generate_midi_bytes(tmp_path)
+        midi_bytes = generate_midi_bytes(tmp_path, track_index=track_index)
         return Response(
             content=midi_bytes,
             media_type="audio/midi",
@@ -86,3 +149,103 @@ async def midi_endpoint(file: UploadFile):
         raise HTTPException(status_code=500, detail=f"Unexpected error: {exc}")
     finally:
         os.unlink(tmp_path)
+
+
+@app.get("/songs")
+async def list_songs():
+    try:
+        db = get_client()
+        resp = (
+            db.table("songs")
+            .select(
+                "id,title,artist,tempo,duration,track_count,created_at,"
+                "bends,hammer_ons,pull_offs,slides,vibratos,palm_mutes,"
+                "barre_chords,open_chords"
+            )
+            .order("created_at", desc=True)
+            .execute()
+        )
+        return resp.data
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/songs/{song_id}/midi")
+async def get_song_midi(song_id: str, track: int = 0):
+    try:
+        db = get_client()
+
+        song_resp = (
+            db.table("songs")
+            .select("tempo")
+            .eq("id", song_id)
+            .execute()
+        )
+        if not song_resp.data:
+            raise HTTPException(status_code=404, detail="Song not found")
+        tempo_bpm = song_resp.data[0]["tempo"] or 120
+
+        track_resp = (
+            db.table("tracks")
+            .select("note_data")
+            .eq("song_id", song_id)
+            .eq("track_index", track)
+            .execute()
+        )
+        if not track_resp.data:
+            raise HTTPException(status_code=404, detail=f"Track {track} not found")
+
+        midi_bytes = generate_midi_from_song_data(track_resp.data[0]["note_data"], tempo_bpm)
+        return Response(
+            content=midi_bytes,
+            media_type="audio/midi",
+            headers={"Content-Disposition": "attachment; filename=song.mid"},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/songs/{song_id}")
+async def get_song(song_id: str):
+    try:
+        db = get_client()
+
+        song_resp = (
+            db.table("songs")
+            .select("*")
+            .eq("id", song_id)
+            .execute()
+        )
+        if not song_resp.data:
+            raise HTTPException(status_code=404, detail="Song not found")
+        song_row = song_resp.data[0]
+
+        tracks_resp = (
+            db.table("tracks")
+            .select("*")
+            .eq("song_id", song_id)
+            .order("track_index")
+            .execute()
+        )
+        tracks = [
+            {
+                "id": t["track_index"],
+                "name": t["name"],
+                "tuning": t["tuning"],
+                "measures": t["note_data"],
+            }
+            for t in tracks_resp.data
+        ]
+
+        return {
+            "title": song_row["title"],
+            "artist": song_row.get("artist"),
+            "tempo": song_row["tempo"],
+            "tracks": tracks,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))

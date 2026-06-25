@@ -80,12 +80,8 @@ def _ql_to_seconds(ql: float, tempo_map: list[tuple[float, int]]) -> float:
     return round(t, 6)
 
 
-def parse_gp(path: str) -> dict:
-    try:
-        song = guitarpro.parse(path)
-    except Exception as exc:
-        raise ValueError(f"Failed to parse Guitar Pro file: {exc}") from exc
-
+def parse_gp_song(song) -> dict:
+    """Convert a pre-parsed guitarpro song object to our JSON-serialisable dict."""
     first_track = next(
         (t for t in song.tracks if not t.isPercussionTrack and t.strings),
         None,
@@ -157,6 +153,15 @@ def parse_gp(path: str) -> dict:
 
     return {
         "title": song.title or "Untitled",
+        "artist": getattr(song, "artist", None) or None,
         "tempo": base_tempo,
         "tracks": tracks_out,
     }
+
+
+def parse_gp(path: str) -> dict:
+    try:
+        song = guitarpro.parse(path)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse Guitar Pro file: {exc}") from exc
+    return parse_gp_song(song)

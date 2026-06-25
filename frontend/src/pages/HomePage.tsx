@@ -1,7 +1,12 @@
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useFileUpload } from '../hooks/useFileUpload';
+import { useStore } from '../store';
+import { loadSampler, transportStop } from '../tone';
+import { loadMidiIntoTone } from '../utils/loadMidiIntoTone';
+import type { Song, SongData } from '../types';
 
-// ── Design tokens ────────────────────────────────────────────────────────────
+// ── Design tokens ─────────────────────────────────────────────────────────────
 const C = {
   bg: '#0D0D0D',
   surface: '#1A1A1A',
@@ -14,9 +19,16 @@ const C = {
 const DISPLAY = "'Space Grotesk', system-ui, sans-serif";
 const BODY = "system-ui, sans-serif";
 
-// ── Tab staff watermark ──────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function formatDuration(seconds: number | null): string {
+  if (seconds == null) return '—';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+// ── Tab staff watermark ───────────────────────────────────────────────────────
 function TabWatermark() {
-  // 6 horizontal lines spread across the column height, matching real tab paper
   const ys = ['16%', '31%', '46%', '61%', '76%', '91%'];
   return (
     <svg
@@ -31,55 +43,141 @@ function TabWatermark() {
   );
 }
 
-// ── Empty table placeholder ───────────────────────────────────────────────────
+// ── Spinner ───────────────────────────────────────────────────────────────────
+function Spinner({ size = 18 }: { size?: number }) {
+  return (
+    <>
+      <style>{`@keyframes bard-spin { to { transform: rotate(360deg); } }`}</style>
+      <div
+        style={{
+          width: size,
+          height: size,
+          border: `2px solid ${C.border}`,
+          borderTopColor: C.accent,
+          borderRadius: '50%',
+          animation: 'bard-spin 0.65s linear infinite',
+          flexShrink: 0,
+        }}
+      />
+    </>
+  );
+}
+
+// ── Library state ─────────────────────────────────────────────────────────────
+type LibraryState =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ready'; songs: Song[] };
+
 const COLUMNS = ['Title', 'Artist', 'Duration', 'Tempo'];
 
-function SongTable() {
+interface SongTableProps {
+  state: LibraryState;
+  query: string;
+  openingId: string | null;
+  onRowClick: (song: Song) => void;
+}
+
+function SongTable({ state, query, openingId, onRowClick }: SongTableProps) {
+  const thStyle: React.CSSProperties = {
+    padding: '10px 16px',
+    textAlign: 'left',
+    fontSize: '11px',
+    fontWeight: 600,
+    letterSpacing: '0.08em',
+    color: C.muted,
+    fontFamily: DISPLAY,
+    textTransform: 'uppercase',
+    whiteSpace: 'nowrap',
+  };
+
+  const emptyCell = (content: React.ReactNode) => (
+    <tr>
+      <td colSpan={4} style={{ padding: '52px 16px', textAlign: 'center', color: C.muted, fontSize: '14px' }}>
+        {content}
+      </td>
+    </tr>
+  );
+
+  let body: React.ReactNode;
+
+  if (state.kind === 'loading') {
+    body = emptyCell(
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10 }}>
+        <Spinner /> <span>Loading library…</span>
+      </div>
+    );
+  } else if (state.kind === 'error') {
+    body = emptyCell(
+      <span style={{ color: '#f87171' }}>Failed to load library — {state.message}</span>
+    );
+  } else {
+    const q = query.trim().toLowerCase();
+    const filtered = q
+      ? state.songs.filter(
+          (s) =>
+            s.title.toLowerCase().includes(q) ||
+            (s.artist ?? '').toLowerCase().includes(q)
+        )
+      : state.songs;
+
+    if (filtered.length === 0) {
+      body = emptyCell('No songs yet. Upload one to get started.');
+    } else {
+      body = filtered.map((song) => {
+        const loading = openingId === song.id;
+        return (
+          <tr
+            key={song.id}
+            onClick={() => !openingId && onRowClick(song)}
+            style={{
+              borderBottom: `1px solid ${C.border}`,
+              cursor: openingId ? 'default' : 'pointer',
+              transition: 'background 120ms',
+            }}
+            onMouseEnter={(e) => {
+              if (!openingId) e.currentTarget.style.background = 'rgba(255,255,255,0.03)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'transparent';
+            }}
+          >
+            <td style={{ padding: '12px 16px', fontSize: '14px', color: C.text, fontWeight: 500 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                {loading && <Spinner size={14} />}
+                {song.title}
+              </div>
+            </td>
+            <td style={{ padding: '12px 16px', fontSize: '14px', color: C.muted }}>{song.artist ?? '—'}</td>
+            <td style={{ padding: '12px 16px', fontSize: '14px', color: C.muted, fontVariantNumeric: 'tabular-nums' }}>
+              {formatDuration(song.duration)}
+            </td>
+            <td style={{ padding: '12px 16px', fontSize: '14px', color: C.muted, fontVariantNumeric: 'tabular-nums' }}>
+              {song.tempo != null ? `${song.tempo} BPM` : '—'}
+            </td>
+          </tr>
+        );
+      });
+    }
+  }
+
   return (
     <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: BODY }}>
       <thead>
         <tr style={{ borderBottom: `1px solid ${C.border}` }}>
           {COLUMNS.map((col) => (
-            <th
-              key={col}
-              style={{
-                padding: '10px 16px',
-                textAlign: 'left',
-                fontSize: '11px',
-                fontWeight: 600,
-                letterSpacing: '0.08em',
-                color: C.muted,
-                fontFamily: DISPLAY,
-                textTransform: 'uppercase',
-              }}
-            >
-              {col}
-            </th>
+            <th key={col} style={thStyle}>{col}</th>
           ))}
         </tr>
       </thead>
-      <tbody>
-        <tr>
-          <td
-            colSpan={4}
-            style={{
-              padding: '48px 16px',
-              textAlign: 'center',
-              color: C.muted,
-              fontSize: '14px',
-            }}
-          >
-            No songs yet. Upload one to get started.
-          </td>
-        </tr>
-      </tbody>
+      <tbody>{body}</tbody>
     </table>
   );
 }
 
 // ── Upload section ────────────────────────────────────────────────────────────
-function UploadSection() {
-  const { upload, status } = useFileUpload();
+function UploadSection({ onUploaded }: { onUploaded: () => void }) {
+  const { upload, status } = useFileUpload(onUploaded);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const loading = status.kind === 'loading';
@@ -171,107 +269,104 @@ function UploadSection() {
 
 // ── Home page ─────────────────────────────────────────────────────────────────
 export function HomePage() {
+  const navigate = useNavigate();
+  const setMidiCache = useStore((s) => s.setMidiCache);
+  const setSongId = useStore((s) => s.setSongId);
+  const [library, setLibrary] = useState<LibraryState>({ kind: 'loading' });
+  const [query, setQuery] = useState('');
+  const [openingId, setOpeningId] = useState<string | null>(null);
+
+  async function fetchLibrary() {
+    try {
+      const res = await fetch('http://localhost:8000/songs');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const songs: Song[] = await res.json();
+      setLibrary({ kind: 'ready', songs });
+    } catch (e) {
+      setLibrary({ kind: 'error', message: String(e) });
+    }
+  }
+
+  useEffect(() => { fetchLibrary(); }, []);
+
+  async function handleRowClick(song: Song) {
+    setOpeningId(song.id);
+    try {
+      const [songRes, midiRes] = await Promise.all([
+        fetch(`http://localhost:8000/songs/${song.id}`),
+        fetch(`http://localhost:8000/songs/${song.id}/midi`),
+      ]);
+      if (!songRes.ok) throw new Error(`HTTP ${songRes.status}`);
+      const songData: SongData = await songRes.json();
+
+      if (midiRes.ok) {
+        const midiBytes = await midiRes.arrayBuffer();
+        const midiBlob = new Blob([midiBytes], { type: 'audio/midi' });
+        setMidiCache(0, midiBlob);
+        setSongId(song.id);
+        await loadSampler();
+        transportStop();
+        await loadMidiIntoTone(midiBlob, 0, false);
+      }
+
+      navigate('/song', { state: { songData } });
+    } catch (e) {
+      console.error('Failed to load song:', e);
+      setOpeningId(null);
+    }
+  }
+
   return (
-    <div
-      style={{ minHeight: '100vh', background: C.bg, color: C.text, display: 'flex', flexDirection: 'column' }}
-    >
-      <div
-        className="flex flex-col md:flex-row flex-1"
-        style={{ minHeight: '100vh' }}
-      >
-        {/* ── Left: identity ──────────────────────────────────────────────── */}
+    <div style={{ minHeight: '100vh', background: C.bg, color: C.text, display: 'flex', flexDirection: 'column' }}>
+      <div className="flex flex-col md:flex-row flex-1" style={{ minHeight: '100vh' }}>
+
+        {/* ── Left: identity ─────────────────────────────────────────────── */}
         <div
           className="relative w-full md:w-2/5 flex items-center justify-center md:justify-start border-b md:border-b-0 md:border-r"
-          style={{
-            padding: '64px 48px',
-            borderColor: C.border,
-          }}
+          style={{ padding: '64px 48px', borderColor: C.border }}
         >
-          {/* Tab staff watermark — very faint */}
           <div style={{ position: 'absolute', inset: 0, opacity: 0.045 }}>
             <TabWatermark />
           </div>
 
           <div style={{ position: 'relative', zIndex: 1, maxWidth: '380px' }}>
-            {/* App name */}
-            <h1
-              style={{
-                fontFamily: DISPLAY,
-                fontWeight: 700,
-                fontSize: 'clamp(40px, 5vw, 64px)',
-                letterSpacing: '0.15em',
-                color: C.text,
-                lineHeight: 1,
-                margin: 0,
-              }}
-            >
+            <h1 style={{
+              fontFamily: DISPLAY,
+              fontWeight: 700,
+              fontSize: 'clamp(40px, 5vw, 64px)',
+              letterSpacing: '0.15em',
+              color: C.text,
+              lineHeight: 1,
+              margin: 0,
+            }}>
               BARD
             </h1>
-
-            {/* Gold accent rule */}
-            <div
-              style={{
-                width: '48px',
-                height: '2px',
-                background: C.accent,
-                margin: '20px 0',
-              }}
-            />
-
-            {/* Tagline */}
-            <p
-              style={{
-                fontFamily: BODY,
-                fontSize: '16px',
-                lineHeight: 1.65,
-                color: C.muted,
-                margin: 0,
-              }}
-            >
+            <div style={{ width: '48px', height: '2px', background: C.accent, margin: '20px 0' }} />
+            <p style={{ fontFamily: BODY, fontSize: '16px', lineHeight: 1.65, color: C.muted, margin: 0 }}>
               Visualize any Guitar Pro file on a real-time fretboard. Built for guitarists, by guitarists.
             </p>
           </div>
         </div>
 
-        {/* ── Right: library panel ─────────────────────────────────────────── */}
-        <div
-          className="flex flex-col flex-1 p-6 md:p-10"
-          style={{ minWidth: 0 }}
-        >
+        {/* ── Right: library panel ──────────────────────────────────────── */}
+        <div className="flex flex-col flex-1 p-6 md:p-10" style={{ minWidth: 0 }}>
           <div
             className="flex flex-col flex-1"
-            style={{
-              background: C.surface,
-              border: `1px solid ${C.border}`,
-              borderRadius: '16px',
-              overflow: 'hidden',
-            }}
+            style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: '16px', overflow: 'hidden' }}
           >
             {/* Panel header */}
             <div
               className="flex items-center justify-between"
-              style={{
-                padding: '16px 20px',
-                borderBottom: `1px solid ${C.border}`,
-                flexShrink: 0,
-              }}
+              style={{ padding: '16px 20px', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}
             >
-              <span
-                style={{
-                  fontFamily: DISPLAY,
-                  fontWeight: 600,
-                  fontSize: '12px',
-                  letterSpacing: '0.1em',
-                  textTransform: 'uppercase',
-                  color: C.muted,
-                }}
-              >
+              <span style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: '12px', letterSpacing: '0.1em', textTransform: 'uppercase', color: C.muted }}>
                 Library
               </span>
-
               <input
                 type="text"
                 placeholder="Search songs…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
                 style={{
                   background: C.bg,
                   border: `1px solid ${C.border}`,
@@ -292,11 +387,16 @@ export function HomePage() {
 
             {/* Song table */}
             <div className="flex-1 overflow-auto">
-              <SongTable />
+              <SongTable
+                state={library}
+                query={query}
+                openingId={openingId}
+                onRowClick={handleRowClick}
+              />
             </div>
 
             {/* Upload section */}
-            <UploadSection />
+            <UploadSection onUploaded={fetchLibrary} />
           </div>
         </div>
       </div>

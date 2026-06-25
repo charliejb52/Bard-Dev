@@ -1,6 +1,8 @@
 import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { loadSampler, scheduleNotes, transportStop } from '../tone';
+import { loadSampler, transportStop } from '../tone';
+import { loadMidiIntoTone } from '../utils/loadMidiIntoTone';
+import { useStore } from '../store';
 import type { SongData } from '../types';
 
 export type UploadStatus =
@@ -17,8 +19,10 @@ async function readErrorDetail(res: Response): Promise<string> {
   }
 }
 
-export function useFileUpload() {
+export function useFileUpload(onSuccess?: () => void) {
   const navigate = useNavigate();
+  const setGpFile = useStore((s) => s.setGpFile);
+  const setMidiCache = useStore((s) => s.setMidiCache);
   const [status, setStatus] = useState<UploadStatus>({ kind: 'idle' });
 
   const upload = useCallback(
@@ -90,18 +94,24 @@ export function useFileUpload() {
         return;
       }
 
+      const midiBlob = new Blob([midiBytes], { type: 'audio/midi' });
       try {
         transportStop();
-        await scheduleNotes(midiBytes);
+        await loadMidiIntoTone(midiBlob, 0, false);
       } catch (e) {
         setStatus({ kind: 'error', stage: 'Note scheduling', message: String(e) });
         return;
       }
 
-      // songData travels via router state; SongPage calls setSongData on mount
+      // Seed the cache so track 0 is never re-fetched, and store the source file
+      // so useMidiTrack can request other tracks on demand.
+      setMidiCache(0, midiBlob);
+      setGpFile(file);
+
+      onSuccess?.();
       navigate('/song', { state: { songData } });
     },
-    [navigate],
+    [navigate, onSuccess, setGpFile, setMidiCache],
   );
 
   return { upload, status };

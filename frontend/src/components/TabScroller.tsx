@@ -27,9 +27,10 @@ export function TabScroller() {
   const currentTime = useStore((s) => s.currentTime);
   const duration = useStore((s) => s.duration);
   const seek = useStore((s) => s.seek);
+  const activeTrackIndex = useStore((s) => s.activeTrackIndex);
 
   if (!songData) return null;
-  const track = songData.tracks[0];
+  const track = songData.tracks[activeTrackIndex] ?? songData.tracks[0];
   if (!track) return null;
 
   const totalSvgWidth = Math.ceil(duration * PPS) + PLAYHEAD_X + 80;
