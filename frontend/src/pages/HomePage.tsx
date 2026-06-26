@@ -4,6 +4,7 @@ import { useFileUpload } from '../hooks/useFileUpload';
 import { useStore } from '../store';
 import { loadSampler, transportStop } from '../tone';
 import { loadMidiIntoTone } from '../utils/loadMidiIntoTone';
+import { supabase, getAuthHeaders } from '../lib/supabase';
 import type { Song, SongData } from '../types';
 
 // ── Design tokens ─────────────────────────────────────────────────────────────
@@ -272,13 +273,15 @@ export function HomePage() {
   const navigate = useNavigate();
   const setMidiCache = useStore((s) => s.setMidiCache);
   const setSongId = useStore((s) => s.setSongId);
+  const user = useStore((s) => s.user);
   const [library, setLibrary] = useState<LibraryState>({ kind: 'loading' });
   const [query, setQuery] = useState('');
   const [openingId, setOpeningId] = useState<string | null>(null);
 
   async function fetchLibrary() {
     try {
-      const res = await fetch('http://localhost:8000/songs');
+      const authHeaders = await getAuthHeaders();
+      const res = await fetch('http://localhost:8000/songs', { headers: authHeaders });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const songs: Song[] = await res.json();
       setLibrary({ kind: 'ready', songs });
@@ -289,12 +292,18 @@ export function HomePage() {
 
   useEffect(() => { fetchLibrary(); }, []);
 
+  async function handleSignOut() {
+    await supabase.auth.signOut();
+    navigate('/auth');
+  }
+
   async function handleRowClick(song: Song) {
     setOpeningId(song.id);
     try {
+      const authHeaders = await getAuthHeaders();
       const [songRes, midiRes] = await Promise.all([
-        fetch(`http://localhost:8000/songs/${song.id}`),
-        fetch(`http://localhost:8000/songs/${song.id}/midi`),
+        fetch(`http://localhost:8000/songs/${song.id}`, { headers: authHeaders }),
+        fetch(`http://localhost:8000/songs/${song.id}/midi`, { headers: authHeaders }),
       ]);
       if (!songRes.ok) throw new Error(`HTTP ${songRes.status}`);
       const songData: SongData = await songRes.json();
@@ -357,9 +366,9 @@ export function HomePage() {
             {/* Panel header */}
             <div
               className="flex items-center justify-between"
-              style={{ padding: '16px 20px', borderBottom: `1px solid ${C.border}`, flexShrink: 0 }}
+              style={{ padding: '16px 20px', borderBottom: `1px solid ${C.border}`, flexShrink: 0, gap: '12px' }}
             >
-              <span style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: '12px', letterSpacing: '0.1em', textTransform: 'uppercase', color: C.muted }}>
+              <span style={{ fontFamily: DISPLAY, fontWeight: 600, fontSize: '12px', letterSpacing: '0.1em', textTransform: 'uppercase', color: C.muted, flexShrink: 0 }}>
                 Library
               </span>
               <input
@@ -379,10 +388,40 @@ export function HomePage() {
                   width: '180px',
                   caretColor: C.accent,
                   transition: 'border-color 150ms',
+                  flexShrink: 0,
                 }}
                 onFocus={(e) => (e.currentTarget.style.borderColor = C.accent)}
                 onBlur={(e) => (e.currentTarget.style.borderColor = C.border)}
               />
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
+                {user?.email && (
+                  <span style={{ fontSize: '12px', color: C.muted, fontFamily: BODY, maxWidth: '140px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {user.email}
+                  </span>
+                )}
+                <button
+                  onClick={handleSignOut}
+                  style={{
+                    padding: '5px 12px',
+                    background: 'transparent',
+                    border: `1px solid ${C.border}`,
+                    borderRadius: '6px',
+                    color: C.muted,
+                    fontFamily: DISPLAY,
+                    fontWeight: 600,
+                    fontSize: '11px',
+                    letterSpacing: '0.06em',
+                    textTransform: 'uppercase',
+                    cursor: 'pointer',
+                    transition: 'border-color 150ms, color 150ms',
+                    whiteSpace: 'nowrap',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.muted; e.currentTarget.style.color = C.text; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.muted; }}
+                >
+                  Sign Out
+                </button>
+              </div>
             </div>
 
             {/* Song table */}

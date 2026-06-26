@@ -5,14 +5,14 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
 import guitarpro
 
 from analysis.techniques import extract_techniques
-from db.client import get_client
+from db.client import get_client, verify_token
 from midi_gen import generate_midi_bytes, generate_midi_from_song_data
 from parser import parse_gp_song
 
@@ -27,6 +27,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+# ── Auth dependency ────────────────────────────────────────────────────────────
+
+def _require_user(authorization: str | None = Header(default=None)) -> str:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    return verify_token(authorization[len("Bearer "):])
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 async def _save_upload(file: UploadFile, suffix: str) -> str:
     content = await file.read()
@@ -50,7 +60,7 @@ def _compute_duration(song_data: dict) -> float:
     return round(end, 3)
 
 
-def _persist_song(song_data: dict, techniques: dict) -> None:
+def _persist_song(song_data: dict, techniques: dict, user_id: str) -> None:
     db = get_client()
     duration = _compute_duration(song_data)
 
@@ -62,6 +72,7 @@ def _persist_song(song_data: dict, techniques: dict) -> None:
             "tempo": song_data["tempo"],
             "duration": duration,
             "track_count": len(song_data["tracks"]),
+            "user_id": user_id,
             **techniques,
         })
         .execute()
@@ -81,8 +92,10 @@ def _persist_song(song_data: dict, techniques: dict) -> None:
     db.table("tracks").insert(track_rows).execute()
 
 
+# ── Endpoints ──────────────────────────────────────────────────────────────────
+
 @app.post("/parse")
-async def parse_endpoint(file: UploadFile):
+async def parse_endpoint(file: UploadFile, user_id: str = Depends(_require_user)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
 
@@ -112,16 +125,15 @@ async def parse_endpoint(file: UploadFile):
         os.unlink(tmp_path)
 
     try:
-        _persist_song(song_data, techniques)
+        _persist_song(song_data, techniques, user_id)
     except Exception as exc:
-        # Non-fatal: return parse result even if DB write fails
         print(f"Warning: DB write failed: {exc}")
 
     return song_data
 
 
 @app.post("/midi")
-async def midi_endpoint(file: UploadFile, track_index: int = 0):
+async def midi_endpoint(file: UploadFile, track_index: int = 0, user_id: str = Depends(_require_user)):
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
 
@@ -152,7 +164,7 @@ async def midi_endpoint(file: UploadFile, track_index: int = 0):
 
 
 @app.get("/songs")
-async def list_songs():
+async def list_songs(user_id: str = Depends(_require_user)):
     try:
         db = get_client()
         resp = (
@@ -162,6 +174,7 @@ async def list_songs():
                 "bends,hammer_ons,pull_offs,slides,vibratos,palm_mutes,"
                 "barre_chords,open_chords"
             )
+            .eq("user_id", user_id)
             .order("created_at", desc=True)
             .execute()
         )
@@ -171,19 +184,22 @@ async def list_songs():
 
 
 @app.get("/songs/{song_id}/midi")
-async def get_song_midi(song_id: str, track: int = 0):
+async def get_song_midi(song_id: str, track: int = 0, user_id: str = Depends(_require_user)):
     try:
         db = get_client()
 
         song_resp = (
             db.table("songs")
-            .select("tempo")
+            .select("tempo,user_id")
             .eq("id", song_id)
             .execute()
         )
         if not song_resp.data:
             raise HTTPException(status_code=404, detail="Song not found")
-        tempo_bpm = song_resp.data[0]["tempo"] or 120
+        song_row = song_resp.data[0]
+        if song_row["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
+        tempo_bpm = song_row["tempo"] or 120
 
         track_resp = (
             db.table("tracks")
@@ -208,7 +224,7 @@ async def get_song_midi(song_id: str, track: int = 0):
 
 
 @app.get("/songs/{song_id}")
-async def get_song(song_id: str):
+async def get_song(song_id: str, user_id: str = Depends(_require_user)):
     try:
         db = get_client()
 
@@ -221,6 +237,8 @@ async def get_song(song_id: str):
         if not song_resp.data:
             raise HTTPException(status_code=404, detail="Song not found")
         song_row = song_resp.data[0]
+        if song_row["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="Access denied")
 
         tracks_resp = (
             db.table("tracks")

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import { loadSampler } from '../tone';
 import { loadMidiIntoTone } from '../utils/loadMidiIntoTone';
+import { getAuthHeaders } from '../lib/supabase';
 
 /**
  * Watches activeTrackIndex and swaps Tone.js notes whenever the track
@@ -44,17 +45,19 @@ export function useMidiTrack() {
         let blob = midiCache[activeTrackIndex];
 
         if (!blob) {
+          const authHeaders = await getAuthHeaders();
           let res: Response;
           if (gpFile) {
             const form = new FormData();
             form.append('file', gpFile);
             res = await fetch(
               `http://localhost:8000/midi?track_index=${activeTrackIndex}`,
-              { method: 'POST', body: form },
+              { method: 'POST', headers: authHeaders, body: form },
             );
           } else if (songId) {
             res = await fetch(
               `http://localhost:8000/songs/${songId}/midi?track=${activeTrackIndex}`,
+              { headers: authHeaders },
             );
           } else {
             return;

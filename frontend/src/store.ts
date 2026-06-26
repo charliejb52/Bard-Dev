@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { User } from '@supabase/supabase-js';
 import type { SongData } from './types';
 
 function computeDuration(song: SongData): number {
@@ -24,6 +25,9 @@ interface PlayerState {
   midiCache: Record<number, Blob>;
   songId: string | null;
 
+  user: User | null;
+  authLoading: boolean;
+
   setSongData: (data: SongData) => void;
   clearSong: () => void;
   _setCurrentTime: (t: number) => void;
@@ -34,6 +38,8 @@ interface PlayerState {
   setGpFile: (file: File | null) => void;
   setMidiCache: (index: number, blob: Blob) => void;
   setSongId: (id: string | null) => void;
+  setUser: (user: User | null) => void;
+  setAuthLoading: (loading: boolean) => void;
 }
 
 export const useStore = create<PlayerState>((set) => ({
@@ -45,6 +51,8 @@ export const useStore = create<PlayerState>((set) => ({
   gpFile: null,
   midiCache: {},
   songId: null,
+  user: null,
+  authLoading: true,
 
   // gpFile, midiCache, and songId are intentionally NOT reset here — they are
   // set by useFileUpload / handleRowClick before navigate() fires, and must
@@ -73,4 +81,8 @@ export const useStore = create<PlayerState>((set) => ({
     set((state) => ({ midiCache: { ...state.midiCache, [index]: blob } })),
 
   setSongId: (id) => set({ songId: id }),
+
+  setUser: (user) => set({ user }),
+
+  setAuthLoading: (loading) => set({ authLoading: loading }),
 }));
