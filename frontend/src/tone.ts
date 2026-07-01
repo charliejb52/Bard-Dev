@@ -68,8 +68,22 @@ export function transportSeek(seconds: number): void {
   Tone.getTransport().seconds = seconds;
 }
 
+// Tune if the cursor is visually ahead of (increase) or behind (decrease) the audio.
+// Defaults to Tone's scheduling lookahead (~0.1 s) plus whatever hardware latency
+// the browser reports; adjust CURSOR_EXTRA_OFFSET for fine-tuning.
+const CURSOR_EXTRA_OFFSET = 0.05;
+
 export function getTransportSeconds(): number {
-  return Tone.getTransport().seconds;
+  const raw = Tone.getContext().rawContext as AudioContext & {
+    outputLatency?: number;
+    baseLatency?: number;
+  };
+  const latency =
+    Tone.getContext().lookAhead +
+    (raw.outputLatency ?? 0) +
+    (raw.baseLatency ?? 0) +
+    CURSOR_EXTRA_OFFSET;
+  return Math.max(0, Tone.getTransport().seconds - latency);
 }
 
 // Must be called inside a user-gesture handler before any audio plays.
